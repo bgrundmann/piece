@@ -1,0 +1,9 @@
+[package]
+
+name = "piece"
+version = "0.0.1"
+authors = ["Benedikt Grundmann <benedikt.grundmann@gmail.com>"]
+
+[dependencies]
+log = "0.3"
+env_logger = "0.3"
