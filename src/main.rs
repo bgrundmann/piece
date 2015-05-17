@@ -1,27 +1,46 @@
+#![feature(collections)]
 #[macro_use]
 extern crate log;
 extern crate env_logger;
 
 /// A append only buffer
 #[derive(Debug)]
-struct AppendOnlyBuffer {
-    buf: String,
+pub struct AppendOnlyBuffer {
+    buf: Vec<u8>,
 } 
 
-#[derive(Debug,Copy,Clone)]
-struct Span {
+#[derive(Debug,Copy,Clone,PartialEq)]
+pub struct Span {
     off1: u32,
     off2: u32,
 } 
 
 impl Span {
     pub fn new(off1: u32, off2: u32) -> Span {
-        assert!(off2 > off1);
+        assert!(off2 >= off1);
         Span { off1: off1, off2: off2 }
+    } 
+
+    /// The empty span 
+    pub fn empty() -> Span {
+        Span::new(0,0)
     } 
 
     pub fn len(&self) -> u32 {
         self.off2 - self.off1 
+    } 
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Split self such that the left piece has n characters.
+    pub fn split(&self, n: u32) -> Option<(Span, Span)> {
+        if n == 0 || n == self.len() {
+            None
+        } else {
+            Some((Span::new(self.off1, self.off1+n), Span::new(self.off1+n, self.off2)))
+        } 
     } 
 } 
 
@@ -29,48 +48,43 @@ impl AppendOnlyBuffer {
     /// Constructs a new, empty AppendOnlyBuffer.
     pub fn new() -> AppendOnlyBuffer {
         AppendOnlyBuffer {
-          buf : String::with_capacity(4096)
+          buf: Vec::with_capacity(4096)
         } 
     }
 
-    /// Append a string.
-    pub fn append(&mut self, s: &str) -> Span {
+    /// Append a slice of bytes.
+    pub fn append(&mut self, bytes: &[u8]) -> Span {
       let off1 = self.buf.len() as u32;
-      self.buf.push_str(s);
+      self.buf.push_all(bytes);
       Span::new(off1, self.buf.len() as u32)
     } 
 
-    pub fn get(&self, s: Span) -> &str {
-        // We know by construction that all Span's constructed by append
-        // are valid UTF-8 strings
-        unsafe {
-            self.buf.slice_unchecked(s.off1 as usize, s.off2 as usize)
-        } 
+    pub fn get(&self, s: Span) -> &[u8] {
+        &self.buf[s.off1 as usize .. s.off2 as usize]
     } 
 } 
 
-#[derive(Debug, Copy, Clone)]
+/// We represent pieces by their index in the vector that we use to allocate 
+/// them.  That is fine because we never free a piece anyway (unlimited undo
+/// for the win).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct Piece(u32);
 
+/// The actual data stored in a piece.  
 #[derive(Debug)]
 struct PieceData {
+    /// Some bytes in the text's buffer
     span: Span,
-    prev: Option<Piece>,
-    next: Option<Piece>,
+    prev: Piece,
+    next: Piece,
+    /// The last piece is marked trailer.  It is also
+    /// always empty (span.is_empty())
+    trailer: bool,
 } 
 
-impl PieceData {
-    pub fn new(s: Span) -> PieceData {
-        PieceData {
-            span: s,
-            prev: None,
-            next: None
-        } 
-    } 
-} 
-
-/// A Text buffer (implemented with the PieceTable method)
-/// There is always at least one piece (which might be empty)
+/// Text is just a sequence of bytes (implemented with the PieceTable method,
+/// ala Oberon).  We on purpose do not require UTF-8 here.  A programmers
+/// editor is most useful when it can deal with any sequence of bytes.
 #[derive(Debug)]
 pub struct Text {
     buffer: AppendOnlyBuffer,
@@ -78,33 +92,152 @@ pub struct Text {
     first: Piece, 
 } 
 
-/// A iterator over each piece
 struct Pieces<'a> {
     text: &'a Text,
-    curr: Option<Piece>,
+    curr: Piece,
     /// start position of piece in text
     off: u32, 
+    /// Has trailer been emited?
+    done: bool,
 } 
 
 impl<'a> Iterator for Pieces<'a> {
     type Item = (u32, Piece);
 
     fn next(&mut self) -> Option<(u32, Piece)> {
-        match self.curr {
-            None => None,
-            Some(piece) => {
-                let Piece(p) = piece;
-                let pd = &self.text.pieces[p as usize];
-                let off = self.off;
-                let span = &pd.span;
-                let next = *&pd.next;
-                self.off = self.off + span.len();
-                self.curr = next;
-                Some ((off, piece))
-            } 
+        if self.done {
+            None
+        } else {
+            let piece = self.curr;
+            let Piece(p) = piece;
+            let pd = &self.text.pieces[p as usize];
+            let off = self.off;
+            let span = &pd.span;
+            let next = *&pd.next;
+            self.off = self.off + span.len();
+            self.curr = next;
+            self.done = pd.trailer;
+            Some ((off, piece))
         } 
     } 
 } 
+
+impl Text {
+    pub fn new() -> Text {
+        let trailer = Piece(0);
+        Text {
+            buffer: AppendOnlyBuffer::new(),
+            pieces: vec![PieceData { 
+                span: Span::empty(),
+                prev: trailer,
+                next: trailer,
+                trailer: true,
+            }],
+            first: trailer,
+        } 
+    } 
+
+    fn pieces(&self) -> Pieces {
+        Pieces {
+            text: self,
+            curr: self.first,
+            off: 0,
+            done: false,
+        } 
+    } 
+
+    fn get_piece(&self, Piece(p): Piece) -> &PieceData {
+        &self.pieces[p as usize]
+    } 
+
+    /// Find the piece containing offset.  Return piece
+    /// and start position of piece in text.
+    fn find_piece(&self, off:u32) -> (u32, Piece) {
+        let mut start = 0;
+        let mut piece = self.first;
+        for (s, p) in self.pieces() {
+            if s > off || self.get_piece(p).trailer {
+                // previous piece was the one we wanted
+                return (start, piece);
+            } 
+            start = s;
+            piece = p;
+        }
+        unreachable!();
+    } 
+
+    /// Insert bytes at offset.
+    pub fn insert(&mut self, off:u32, bytes: &[u8]) {
+        let (start, piece) = self.find_piece(off);
+        let span = self.get_piece(piece).span;
+        if let Some((left_span, right_span)) = span.split(off - start) {
+            unreachable!();
+        } else {
+            // insert at beginning
+            assert_eq!(start, off);
+            let span = self.buffer.append(bytes);
+        } 
+    } 
+} 
+
+#[test]
+fn test_pieces() {
+    let t = Text::new();
+    assert_eq!(t.pieces().collect::<Vec<_>>(), vec![(0, Piece(0))]);
+} 
+
+#[cfg(test)]
+mod tests {
+    mod span {
+        use super::super::*;
+
+        #[test]
+        fn basics() {
+            let s = Span::new(1, 1);
+            assert_eq!(s.len(), 0);
+            assert!(s.is_empty());
+            let s2 = Span::new(3, 7);
+            assert!(s2.len() == 4);
+        } 
+
+        #[test]
+        fn split() {
+            let s = Span::new(3, 7);
+            assert_eq!(s.split(0), None);
+            assert_eq!(s.split(4), None);
+            assert_eq!(s.split(3), Some((Span { off1: 3, off2: 6 }, Span { off1: 6, off2: 7 })));
+        } 
+    } 
+
+    mod append_only_buffer {
+        use super::super::*;
+
+        #[test] 
+        fn basics() {
+            let mut b = AppendOnlyBuffer::new();
+            let bytes = "Hello World".as_bytes();
+            let sp = b.append(bytes);
+            assert_eq!(b.get(sp), bytes);
+            let bytes2 = "Just testing".as_bytes();
+            let sp2 = b.append(bytes2);
+            assert_eq!(b.get(sp), bytes);
+            assert_eq!(b.get(sp2), bytes2);
+        } 
+    } 
+
+    mod text {
+        use super::super::*;
+
+        #[test]
+        fn basics() {
+            let mut t = Text::new();
+            t.insert(0, "Hello".as_bytes());
+        } 
+    } 
+}
+/*
+
+
 
 impl Text {
     pub fn from_str(s: &str) -> Text {
@@ -154,18 +287,6 @@ impl Text {
         (off, piece)
     } 
 
-    /// Find the piece containing offset.  Return piece
-    /// and start position of piece in text.
-    fn piece_containing(&self, off:u32) -> Option<(u32, Piece)> {
-        let mut start = 0;
-        let mut piece = self.first;
-        for (s, p) in self.iter_pieces() {
-            if s <= off && off < s + self.get_piece(p).span.len() {
-                return Some((s, p));
-            } 
-        }
-        None
-    } 
 
     fn link(&mut self, p1: Piece, p2: Piece) {
         self.get_mut_piece(p1).next = Some(p2);
@@ -245,3 +366,4 @@ fn main() {
     } 
     println!("{}", text.to_string());
 }
+*/
