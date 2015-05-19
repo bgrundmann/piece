@@ -77,9 +77,9 @@ struct PieceData {
     span: Span,
     prev: Piece,
     next: Piece,
-    /// The last piece is marked trailer.  It is also
+    /// The first/last piece is a sentinel.  It is also
     /// always empty (span.is_empty())
-    trailer: bool,
+    sentinel: bool,
 } 
 
 /// Text is just a sequence of bytes (implemented with the PieceTable method,
@@ -116,24 +116,26 @@ impl<'a> Iterator for Pieces<'a> {
             let next = *&pd.next;
             self.off = self.off + span.len();
             self.curr = next;
-            self.done = pd.trailer;
+            self.done = pd.sentinel;
             Some ((off, piece))
         } 
     } 
 } 
 
+// The sentinel is always stored at position 0 in the pieces vector
+const SENTINEL: Piece = Piece(0);
+
 impl Text {
     pub fn new() -> Text {
-        let trailer = Piece(0);
         Text {
             buffer: AppendOnlyBuffer::new(),
             pieces: vec![PieceData { 
                 span: Span::empty(),
-                prev: trailer,
-                next: trailer,
-                trailer: true,
+                prev: SENTINEL,
+                next: SENTINEL,
+                sentinel: true,
             }],
-            first: trailer,
+            first: SENTINEL,
         } 
     } 
 
@@ -150,13 +152,20 @@ impl Text {
         &self.pieces[p as usize]
     } 
 
+    fn link(&mut self, piece1: Piece, piece2: Piece) {
+        let Piece(p1) = piece1;
+        let Piece(p2) = piece2;
+        self.pieces[p1 as usize].next = piece2;
+        self.pieces[p2 as usize].prev = piece1;
+    } 
+
     /// Find the piece containing offset.  Return piece
     /// and start position of piece in text.
     fn find_piece(&self, off:u32) -> (u32, Piece) {
         let mut start = 0;
         let mut piece = self.first;
         for (s, p) in self.pieces() {
-            if s > off || self.get_piece(p).trailer {
+            if s > off || self.get_piece(p).sentinel {
                 // previous piece was the one we wanted
                 return (start, piece);
             } 
@@ -166,17 +175,48 @@ impl Text {
         unreachable!();
     } 
 
+    fn add_piece(&mut self, span: Span) -> Piece {
+        self.pieces.push(PieceData { 
+            span: span, 
+            prev: SENTINEL, 
+            next: SENTINEL,
+            sentinel: false
+        } );
+        Piece((self.pieces.len() - 1) as u32)
+    } 
+
     /// Insert bytes at offset.
     pub fn insert(&mut self, off:u32, bytes: &[u8]) {
         let (start, piece) = self.find_piece(off);
-        let span = self.get_piece(piece).span;
+        let (span, prev) = {
+            let d = self.get_piece(piece);
+            (d.span, d.prev)
+        };
         if let Some((left_span, right_span)) = span.split(off - start) {
             unreachable!();
         } else {
-            // insert at beginning
+            // insert at beginning aka in front of the piece
             assert_eq!(start, off);
             let span = self.buffer.append(bytes);
+            let p = self.add_piece(span);
+            self.link(p, piece);
+            self.link(prev, p);
+            if piece == self.first {
+                self.first = p
+            } 
         } 
+    } 
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        for (_, p) in self.pieces() {
+            v.push_all(self.buffer.get(self.get_piece(p).span))
+        } 
+        v
+    } 
+
+    pub fn to_utf8_string(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.to_vec())
     } 
 } 
 
@@ -231,7 +271,10 @@ mod tests {
         #[test]
         fn basics() {
             let mut t = Text::new();
-            t.insert(0, "Hello".as_bytes());
+            t.insert(0, "World".as_bytes());
+            assert_eq!(t.to_utf8_string().unwrap(), "Hello");
+            t.insert(0, "Hello ".as_bytes());
+            assert_eq!(t.to_utf8_string().unwrap(), "Hello World")
         } 
     } 
 }
