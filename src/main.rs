@@ -71,15 +71,14 @@ impl AppendOnlyBuffer {
 struct Piece(u32);
 
 /// The actual data stored in a piece.  
+/// We have one sentinel piece which is always stored at index 0
+/// in the vector.  It's span is also empty
 #[derive(Debug)]
 struct PieceData {
     /// Some bytes in the text's buffer
     span: Span,
     prev: Piece,
     next: Piece,
-    /// The first/last piece is a sentinel.  It is also
-    /// always empty (span.is_empty())
-    sentinel: bool,
 } 
 
 /// Text is just a sequence of bytes (implemented with the PieceTable method,
@@ -89,34 +88,31 @@ struct PieceData {
 pub struct Text {
     buffer: AppendOnlyBuffer,
     pieces: Vec<PieceData>,
-    first: Piece, 
+    len: usize,
 } 
 
 struct Pieces<'a> {
     text: &'a Text,
-    curr: Piece,
+    next: Piece,
     /// start position of piece in text
     off: u32, 
-    /// Has trailer been emited?
-    done: bool,
 } 
 
 impl<'a> Iterator for Pieces<'a> {
     type Item = (u32, Piece);
 
     fn next(&mut self) -> Option<(u32, Piece)> {
-        if self.done {
+        if self.next == SENTINEL {
             None
         } else {
-            let piece = self.curr;
+            let piece = self.next;
             let Piece(p) = piece;
             let pd = &self.text.pieces[p as usize];
             let off = self.off;
             let span = &pd.span;
             let next = *&pd.next;
             self.off = self.off + span.len();
-            self.curr = next;
-            self.done = pd.sentinel;
+            self.next = next;
             Some ((off, piece))
         } 
     } 
@@ -133,19 +129,46 @@ impl Text {
                 span: Span::empty(),
                 prev: SENTINEL,
                 next: SENTINEL,
-                sentinel: true,
             }],
-            first: SENTINEL,
+            len: 0,
         } 
     } 
 
+    fn invariant(&self) {
+        let mut l = 0;
+        let mut p = self.get_piece(SENTINEL).next;
+        while p != SENTINEL {
+            let len = self.get_piece(p).span.len();
+            assert!(len > 0);
+            l += len;
+            p = self.get_piece(p).next;
+        } 
+        assert_eq!(l as usize, self.len());
+
+        let mut l = 0;
+        let mut p = self.get_piece(SENTINEL).prev;
+        while p != SENTINEL {
+            let len = self.get_piece(p).span.len();
+            assert!(len > 0);
+            l += len;
+            p = self.get_piece(p).prev;
+        } 
+        assert_eq!(l as usize, self.len());
+    } 
+
+    /// Iterator over all pieces (but never the sentinel)
     fn pieces(&self) -> Pieces {
+        let next = self.get_piece(SENTINEL).next;
         Pieces {
             text: self,
-            curr: self.first,
+            next: next,
             off: 0,
-            done: false,
         } 
+    } 
+
+    /// Length of Text in bytes
+    pub fn len(&self) -> usize {
+        self.len
     } 
 
     fn get_piece(&self, Piece(p): Piece) -> &PieceData {
@@ -161,18 +184,25 @@ impl Text {
 
     /// Find the piece containing offset.  Return piece
     /// and start position of piece in text.
+    /// Will return the sentinel iff off == self.len()
+    /// Returns the right piece if off between two
+    /// pieces
     fn find_piece(&self, off:u32) -> (u32, Piece) {
-        let mut start = 0;
-        let mut piece = self.first;
-        for (s, p) in self.pieces() {
-            if s > off || self.get_piece(p).sentinel {
-                // previous piece was the one we wanted
-                return (start, piece);
-            } 
-            start = s;
-            piece = p;
-        }
-        unreachable!();
+        if off == self.len() as u32 {
+            (off, SENTINEL)
+        } else { 
+            let mut start = 0;
+            let mut piece = SENTINEL;
+            for (s, p) in self.pieces() {
+                if s > off {
+                    // previous piece was the one we wanted
+                    return (start, piece);
+                } 
+                start = s;
+                piece = p;
+            }
+            return (start, piece);
+        } 
     } 
 
     fn add_piece(&mut self, span: Span) -> Piece {
@@ -180,7 +210,6 @@ impl Text {
             span: span, 
             prev: SENTINEL, 
             next: SENTINEL,
-            sentinel: false
         } );
         Piece((self.pieces.len() - 1) as u32)
     } 
@@ -188,12 +217,19 @@ impl Text {
     /// Insert bytes at offset.
     pub fn insert(&mut self, off:u32, bytes: &[u8]) {
         let (start, piece) = self.find_piece(off);
-        let (span, prev) = {
+        let (span, prev, next) = {
             let d = self.get_piece(piece);
-            (d.span, d.prev)
+            (d.span, d.prev, d.next)
         };
         if let Some((left_span, right_span)) = span.split(off - start) {
-            unreachable!();
+            let left = self.add_piece(left_span);
+            let span = self.buffer.append(bytes);
+            let middle = self.add_piece(span);
+            let right = self.add_piece(right_span);
+            self.link(prev, left);
+            self.link(left, middle);
+            self.link(middle, right);
+            self.link(right, next);
         } else {
             // insert at beginning aka in front of the piece
             assert_eq!(start, off);
@@ -201,10 +237,9 @@ impl Text {
             let p = self.add_piece(span);
             self.link(p, piece);
             self.link(prev, p);
-            if piece == self.first {
-                self.first = p
-            } 
         } 
+        self.len = self.len + bytes.len();
+        self.invariant();
     } 
 
     pub fn to_vec(&self) -> Vec<u8> {
@@ -223,7 +258,7 @@ impl Text {
 #[test]
 fn test_pieces() {
     let t = Text::new();
-    assert_eq!(t.pieces().collect::<Vec<_>>(), vec![(0, Piece(0))]);
+    assert_eq!(t.pieces().collect::<Vec<_>>(), vec![]);
 } 
 
 #[cfg(test)]
@@ -269,13 +304,38 @@ mod tests {
         use super::super::*;
 
         #[test]
-        fn basics() {
+        fn insert_beginning() {
             let mut t = Text::new();
+            assert_eq!(t.len(), 0);
             t.insert(0, "World".as_bytes());
-            assert_eq!(t.to_utf8_string().unwrap(), "Hello");
+            assert_eq!(t.len(), 5);
+            assert_eq!(t.to_utf8_string().unwrap(), "World");
             t.insert(0, "Hello ".as_bytes());
-            assert_eq!(t.to_utf8_string().unwrap(), "Hello World")
+            assert_eq!(t.len(), 11);
+            assert_eq!(t.to_utf8_string().unwrap(), "Hello World");
+            t.insert(0, "...".as_bytes());
+            assert_eq!(t.len(), 14);
+            assert_eq!(t.to_utf8_string().unwrap(), "...Hello World");
         } 
+
+        #[test]
+        fn append() {
+            let mut t = Text::new();
+            t.insert(0, "Hello".as_bytes());
+            assert_eq!(t.to_utf8_string().unwrap(), "Hello");
+            t.insert(5, " Bene".as_bytes());
+            assert_eq!(t.to_utf8_string().unwrap(), "Hello Bene");
+        } 
+
+        #[test]
+        fn insert_middle() {
+            let mut t = Text::new();
+            t.insert(0, "1234".as_bytes());
+            t.insert(2, "x".as_bytes());
+            assert_eq!(t.to_utf8_string().unwrap(), "12x34");
+            t.insert(3, "yz".as_bytes());
+            assert_eq!(t.to_utf8_string().unwrap(), "12xyz34");
+        }
     } 
 }
 /*
