@@ -63,8 +63,8 @@ impl AppendOnlyBuffer {
         &self.buf[s.off1 as usize .. s.off2 as usize]
     } 
 
-    pub fn get_byte(&self, u32) -> u8 {
-        self.buf[u32]
+    pub fn get_byte(&self, p: u32) -> u8 {
+        self.buf[p as usize]
     } 
 } 
 
@@ -122,9 +122,9 @@ impl<'a> Iterator for Pieces<'a> {
     } 
 } 
 
-struct Bytes<'a> {
+pub struct Bytes<'a> {
     pieces: Pieces<'a>,
-    pd: Option<&'a PieceData>;
+    pd: Option<&'a PieceData>,
     // where we are in the current piece
     off: u32
 } 
@@ -136,11 +136,11 @@ impl<'a> Iterator for Bytes<'a> {
         match self.pd {
             None => None,
             Some(pd) => {
-                let span = pd.span in
+                let span = pd.span;
                 if self.off >= span.len() {
                     self.off = 0;
-                    self.pd = self.pieces.next();
-                    self.next();
+                    self.pd = self.pieces.next().map(|(_, p)| self.pieces.text.get_piece(p));
+                    self.next()
                 } else {
                     let byte = self.pieces.text.buffer.get_byte(span.off1 + self.off);
                     self.off += 1;
@@ -202,6 +202,17 @@ impl Text {
     /// Length of Text in bytes
     pub fn len(&self) -> usize {
         self.len
+    } 
+
+    /// Iterator over all bytes
+    pub fn bytes(&self) -> Bytes {
+        let mut pieces = self.pieces();
+        let pd = pieces.next().map(|(_, p)| self.get_piece(p));
+        Bytes {
+            pieces: pieces,
+            pd: pd,
+            off: 0
+        } 
     } 
 
     fn get_piece(&self, Piece(p): Piece) -> &PieceData {
@@ -446,6 +457,24 @@ mod tests {
             t.delete(1, 5);
             assert_eq!(t.len(), 2);
             assert_eq!(t.to_utf8_string().unwrap(), "16");
+        } 
+
+        #[test]
+        fn bytes1() {
+            let mut t = Text::new();
+            let bytes = vec![0, 1, 2];
+            t.insert(0, &bytes);
+            assert_eq!(t.bytes().collect::<Vec<_>>(), bytes);
+        } 
+
+        #[test]
+        fn bytes2() {
+            let mut t = Text::new();
+            let bytes = vec![0, 1, 2];
+            let bytes2 = vec![3, 4];
+            t.insert(0, &bytes2);
+            t.insert(0, &bytes);
+            assert_eq!(t.bytes().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
         } 
     } 
 }
