@@ -62,6 +62,10 @@ impl AppendOnlyBuffer {
     pub fn get(&self, s: Span) -> &[u8] {
         &self.buf[s.off1 as usize .. s.off2 as usize]
     } 
+
+    pub fn get_byte(&self, u32) -> u8 {
+        self.buf[u32]
+    } 
 } 
 
 /// We represent pieces by their index in the vector that we use to allocate 
@@ -114,6 +118,35 @@ impl<'a> Iterator for Pieces<'a> {
             self.off = self.off + span.len();
             self.next = next;
             Some ((off, piece))
+        } 
+    } 
+} 
+
+struct Bytes<'a> {
+    pieces: Pieces<'a>,
+    pd: Option<&'a PieceData>;
+    // where we are in the current piece
+    off: u32
+} 
+
+impl<'a> Iterator for Bytes<'a> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        match self.pd {
+            None => None,
+            Some(pd) => {
+                let span = pd.span in
+                if self.off >= span.len() {
+                    self.off = 0;
+                    self.pd = self.pieces.next();
+                    self.next();
+                } else {
+                    let byte = self.pieces.text.buffer.get_byte(span.off1 + self.off);
+                    self.off += 1;
+                    Some(byte)
+                } 
+            } 
         } 
     } 
 } 
