@@ -214,8 +214,50 @@ impl Text {
         Piece((self.pieces.len() - 1) as u32)
     } 
 
+    /// Delete bytes between off1 (inclusive) and off2 (exclusive)
+    pub fn delete(&mut self, off1: u32, off2: u32) {
+        if off2 <= off1 {
+            return;
+        } 
+        let (lstart, lpiece) = self.find_piece(off1);
+        let lspan = self.get_piece(lpiece).span; 
+        let (rstart, rpiece) = self.find_piece(off2);
+        let rspan = self.get_piece(rpiece).span; 
+        let left = {
+            if let Some((left_span, _right_span)) = lspan.split(off1 - lstart) {
+                let l = self.get_piece(lpiece).prev;
+                let remainder = self.add_piece(left_span);
+                self.link(l, remainder);
+                remainder
+            } else {
+                // We are deleting all of piece
+                assert_eq!(lstart, off1);
+                self.get_piece(lpiece).prev
+            } 
+        };
+        let right = {
+            if let Some((_left_span, right_span)) = rspan.split(off2 - rstart) {
+                let r = self.get_piece(rpiece).next;
+                let remainder = self.add_piece(right_span);
+                self.link(remainder, r);
+                remainder
+            } else {
+                // We are at the beginning of piece and therefore
+                // won't delete anything of it
+                assert_eq!(rstart, off2);
+                rpiece
+            } 
+        };
+        self.len -= (off2 - off1) as usize;
+        self.link(left, right);
+        self.invariant()
+    } 
+
     /// Insert bytes at offset.
     pub fn insert(&mut self, off:u32, bytes: &[u8]) {
+        if bytes.len() == 0 {
+            return;
+        } 
         let (start, piece) = self.find_piece(off);
         let (span, prev, next) = {
             let d = self.get_piece(piece);
@@ -336,6 +378,42 @@ mod tests {
             t.insert(3, "yz".as_bytes());
             assert_eq!(t.to_utf8_string().unwrap(), "12xyz34");
         }
+
+        #[test]
+        fn delete_all1() {
+            let mut t = Text::new();
+            t.insert(0, "123456".as_bytes());
+            t.delete(0, 6);
+            assert_eq!(t.len(), 0);
+        } 
+
+        #[test]
+        fn delete_all2() {
+            let mut t = Text::new();
+            t.insert(0, "456".as_bytes());
+            t.insert(0, "123".as_bytes());
+            t.delete(0, 6);
+            assert_eq!(t.len(), 0);
+        } 
+
+        #[test]
+        fn delete_part1() {
+            let mut t = Text::new();
+            t.insert(0, "123456".as_bytes());
+            t.delete(1, 5);
+            assert_eq!(t.len(), 2);
+            assert_eq!(t.to_utf8_string().unwrap(), "16");
+        } 
+
+        #[test]
+        fn delete_part2() {
+            let mut t = Text::new();
+            t.insert(0, "456".as_bytes());
+            t.insert(0, "123".as_bytes());
+            t.delete(1, 5);
+            assert_eq!(t.len(), 2);
+            assert_eq!(t.to_utf8_string().unwrap(), "16");
+        } 
     } 
 }
 /*
