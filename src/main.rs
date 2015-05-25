@@ -3,6 +3,13 @@
 extern crate log;
 extern crate env_logger;
 
+// TODO: 
+//     - Benchmarks
+//     - Cache of last piece
+//     - merge consecutive insert, delete
+//     - snapshots
+//     - Allow String, &str, &[u8], and Vec<u8> as parameter to insert, append
+
 /// A append only buffer
 #[derive(Debug)]
 pub struct AppendOnlyBuffer {
