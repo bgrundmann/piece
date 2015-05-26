@@ -2,6 +2,7 @@
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+extern crate parser_combinators;
 
 // TODO: 
 //     - Benchmarks
@@ -11,6 +12,8 @@ extern crate env_logger;
 //     - Allow String, &str, &[u8], and Vec<u8> as parameter to insert, append
 
 /// A append only buffer
+/// (This is unnecessary inefficient because we copy, we could
+/// just allocate new separate buffers)
 #[derive(Debug)]
 pub struct AppendOnlyBuffer {
     buf: Vec<u8>,
@@ -495,13 +498,32 @@ mod tests {
     } 
 }
 
+/// Set of possible commands
+#[derive(Debug, Clone)]
+pub enum Command {
+    Insert(String),
+} 
+
+use parser_combinators::primitives::ParseError;
+use parser_combinators::{spaces, between, many, char, satisfy, Parser, ParserExt};
+
+impl Command {
+    pub fn parse(s: &str) -> Result<(Command, &str), ParseError> {
+        let literal = between(char('/'), char('/'), many(satisfy(|c| c != '/')).map(Command::Insert));
+        let spaces = spaces();
+        spaces.with(char('i').with(literal)).parse(s)
+    } 
+} 
+
 #[cfg(not(test))]
 fn main() {
     env_logger::init().unwrap();
     info!("starting up");
 
-    let mut text = Text::new();
-    text.append("Hello".as_bytes());
-    text.append(" ".as_bytes());
-    text.append("World!".as_bytes());
+    //let mut text = Text::new();
+    let mut args = std::env::args();
+    args.next().unwrap();
+    let s = args.next().unwrap();
+    let cmd = Command::parse(&s);
+    println!("{:?}", cmd);
 }
